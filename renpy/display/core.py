@@ -2263,7 +2263,7 @@ class Interface(object):
 
         s = "Total time until interface ready: {}s".format(time.time() - import_time)
 
-        if renpy.android and not renpy.config.log_to_stdout:
+        if (renpy.android or renpy.auroraos) and not renpy.config.log_to_stdout:
             print(s)
 
     def post_init(self):
@@ -2378,7 +2378,7 @@ class Interface(object):
 
         renpy.config.renderer = renderer
 
-        if renpy.android or renpy.ios or renpy.emscripten:
+        if renpy.android or renpy.ios or renpy.emscripten or renpy.auroraos:
             renderers = [ "gles" ]
         elif renpy.windows:
             renderers = [ "gl", "angle", "gles" ]
@@ -3161,6 +3161,12 @@ class Interface(object):
 
         while True:
             ev = pygame.event.wait()
+
+            # if ev.type == pygame.QUIT:
+            #     renpy.exports.quit(save=False)   
+
+            if ev.type == pygame.APP_TERMINATING:
+                sys.exit(0)
 
             if ev.type == pygame.APP_DIDENTERFOREGROUND:
                 break

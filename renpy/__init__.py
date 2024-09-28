@@ -123,6 +123,7 @@ linux = False
 android = False
 ios = False
 emscripten = False
+auroraos = True
 
 # Should we enable experimental features and debugging?
 experimental = "RENPY_EXPERIMENTAL" in os.environ
@@ -176,11 +177,14 @@ elif "ANDROID_PRIVATE" in os.environ:
     android = True
 elif sys.platform == 'emscripten' or "RENPY_EMSCRIPTEN" in os.environ:
     emscripten = True
+elif "RENPY_AURORA_OS_PLATFORM" in os.environ:
+    auroraos = True
+    # linux = True
 else:
     linux = True
 
 # A flag that's true if we're on a smartphone or tablet-like platform.
-mobile = android or ios or emscripten
+mobile = android or ios or emscripten or auroraos
 
 # A flag that's set to true if the game directory is bundled inside a mac app.
 macapp = False

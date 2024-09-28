@@ -31,6 +31,9 @@ except:
 
 import renpy.display
 import renpy.text.ftfont as ftfont
+
+ftfont.init()
+
 import renpy.text.textsupport as textsupport
 
 ftfont.init() # @UndefinedVariable

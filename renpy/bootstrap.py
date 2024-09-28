@@ -283,7 +283,8 @@ You may be using a system install of python. Please run {0}.sh,
         raise
 
     # If we're not given a command, show the presplash.
-    if args.command == "run" and not renpy.mobile:
+    # if renpy.auroraos or (args.command == "run" and not renpy.mobile):
+    if (args.command == "run" and not renpy.mobile):
         import renpy.display.presplash # @Reimport
         renpy.display.presplash.start(basedir, gamedir)
 

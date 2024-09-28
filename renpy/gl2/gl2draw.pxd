@@ -82,4 +82,6 @@ cdef class GL2Draw:
     # The current FBO.
     cdef public GLuint current_fbo
 
+    cdef public object auroraos_vertical_viewport
+
     cdef void change_fbo(self, GLuint fbo)

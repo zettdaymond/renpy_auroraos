@@ -121,6 +121,8 @@ cdef class GL2Draw:
         # The shader cache,
         self.shader_cache = None
 
+        self.auroraos_vertical_viewport = False
+
     def get_texture_size(self):
         """
         Returns the amount of memory locked up in textures.
@@ -295,7 +297,7 @@ cdef class GL2Draw:
 
         pwidth, pheight = self.select_physical_size(physical_size)
 
-        if renpy.android or renpy.ios:
+        if renpy.android or renpy.ios or renpy.auroraos:
             fullscreen = True
         else:
             fullscreen = renpy.game.preferences.fullscreen
@@ -328,7 +330,7 @@ cdef class GL2Draw:
         gles = self.gles
         window_flags = pygame.OPENGL | pygame.DOUBLEBUF
 
-        if renpy.android:
+        if renpy.android or renpy.auroraos:
             pwidth = 0
             pheight = 0
             gles = True
@@ -338,7 +340,7 @@ cdef class GL2Draw:
             pwidth = 0
             pheight = 0
             gles = True
-
+        
         else:
             if self.dpi_scale == 1.0:
                 window_flags |= pygame.WINDOW_ALLOW_HIGHDPI
@@ -429,7 +431,7 @@ cdef class GL2Draw:
             self.quit_fbo()
             self.shader_cache.clear()
 
-        if renpy.android or renpy.ios:
+        if renpy.android or renpy.ios or renpy.auroraos:
             pygame.display.get_window().recreate_gl_context()
 
         # Are we in fullscreen mode?
@@ -437,6 +439,11 @@ cdef class GL2Draw:
 
         # Get the size of the created screen.
         pwidth, pheight = renpy.display.core.get_size()
+        if renpy.auroraos:
+            # chaeck if wayland get vertical surface
+            if pwidth < pheight:
+                self.auroraos_vertical_viewport = True
+                pwidth, pheight = tuple(reversed(renpy.display.core.get_size()))
 
         renpy.game.preferences.fullscreen = fullscreen
         renpy.game.interface.fullscreen = fullscreen
@@ -445,6 +452,11 @@ cdef class GL2Draw:
 
         self.physical_size = (pwidth, pheight)
         self.drawable_size = pygame.display.get_drawable_size()
+
+        if renpy.auroraos and self.auroraos_vertical_viewport:
+            self.drawable_size = tuple(reversed(pygame.display.get_drawable_size()))
+
+        renpy.display.log.write("Screen sizes: virtual=%r physical=%r drawable=%r" % (self.virtual_size, self.physical_size, self.drawable_size))
 
         if not fullscreen:
             renpy.game.preferences.physical_size = self.get_physical_size()
@@ -518,7 +530,7 @@ cdef class GL2Draw:
 
         fullscreen = renpy.game.preferences.fullscreen
 
-        if renpy.android or renpy.ios:
+        if renpy.android or renpy.ios or renpy.auroraos:
             fullscreen = True
 
         if renpy.game.preferences.physical_size:
@@ -548,6 +560,20 @@ cdef class GL2Draw:
         fullscreen = bool(pygame.display.get_window().get_window_flags() & (pygame.WINDOW_FULLSCREEN_DESKTOP | pygame.WINDOW_FULLSCREEN))
 
         size = renpy.display.core.get_size()
+
+        if renpy.auroraos:
+            # we need to check switchinch to landscape mode
+            if self.auroraos_vertical_viewport:    
+                size = tuple(reversed(renpy.display.core.get_size()))
+            else:
+                size = renpy.display.core.get_size()
+
+        drawable_size = pygame.display.get_drawable_size()
+        if renpy.auroraos:
+            if self.auroraos_vertical_viewport:    
+                drawable_size = tuple(reversed(pygame.display.get_drawable_size()))
+            else:
+                drawable_size = pygame.display.get_drawable_size()
 
         if force or (fullscreen != renpy.display.interface.fullscreen) or (size != self.physical_size):
             renpy.display.interface.before_resize()
@@ -817,8 +843,21 @@ cdef class GL2Draw:
         self.change_fbo(self.default_fbo)
 
         # Set up the viewport.
-        x, y, w, h = self.drawable_viewport
-        glViewport(x, y, w, h)
+
+        screenshot = False
+
+        if screenshot:
+            x = 0
+            y = 0
+            w = surf.width * self.draw_per_virt
+            h = surf.height * self.draw_per_virt
+        else:
+            x, y, w, h = self.drawable_viewport
+
+        if self.auroraos_vertical_viewport and screenshot != True:
+            glViewport(y, x, h, w)
+        else:
+            glViewport(x, y, w, h)
 
         # Clear the screen.
         clear_r, clear_g, clear_b = renpy.color.Color(renpy.config.gl_clear_color).rgb
@@ -827,7 +866,17 @@ cdef class GL2Draw:
 
         # Project the child from virtual space to the screen space.
         cdef Matrix transform
-        transform = Matrix.cscreen_projection(self.virtual_size[0], self.virtual_size[1])
+
+        if screenshot:
+            if self.auroraos_vertical_viewport:
+                transform = Matrix.cscreen_projection(surf.width, surf.height)
+            else:
+                transform = Matrix.cscreen_projection(surf.width, surf.height)
+        else:
+            if self.auroraos_vertical_viewport:
+                transform = Matrix.rotate(0, 0, -90) *  Matrix.cscreen_projection(self.virtual_size[0], self.virtual_size[1])
+            else:
+                transform = Matrix.cscreen_projection(self.virtual_size[0], self.virtual_size[1])
 
         # Set up the default modes.
         glEnable(GL_BLEND)

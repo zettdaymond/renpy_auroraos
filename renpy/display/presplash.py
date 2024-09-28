@@ -47,11 +47,16 @@ class ProgressBar(pygame_sdl2.sprite.Sprite):
 
     def __init__(self, foreground, background):
         super(ProgressBar, self).__init__()
-        self.foreground = pygame_sdl2.image.load(foreground)
-        self.background = pygame_sdl2.image.load(background)
+        self.foreground = pygame_sdl2.transform.rotate(pygame_sdl2.image.load(foreground), 270)
+        self.background = pygame_sdl2.transform.rotate(pygame_sdl2.image.load(background), 270)
         self.width, self.height = self.background.get_size()
         self.image = pygame_sdl2.Surface((self.width, self.height))
         self.counter = 0.0
+
+        bounds = pygame_sdl2.display.get_display_bounds(0)
+
+        self.x = bounds[0] + bounds[2] // 2 - self.width // 2
+        self.y = bounds[1] + bounds[3] // 2 - self.height // 2
 
     def convert_alpha(self, surface=None):
         self.foreground = self.foreground.convert_alpha(surface)
@@ -60,12 +65,23 @@ class ProgressBar(pygame_sdl2.sprite.Sprite):
     def get_size(self):
         return (self.width, self.height)
 
+<<<<<<< HEAD
     def update(self, total):
         self.counter += 1
         width = self.width * min(self.counter / total, 1)
         foreground = self.foreground.subsurface(0, 0, width, self.height)
         self.image.blit(self.background, (0, 0))
         self.image.blit(foreground, (0, 0))
+=======
+    def get_at(self, pos):
+        return self.background.get_at(pos)
+
+    def draw(self, target, done):
+        new_height = self.height * min(done, 1)
+        foreground = self.foreground.subsurface(0, 0, self.width, new_height)
+        target.blit(self.background, (self.x, self.y))
+        target.blit(foreground, (self.x, self.y))
+>>>>>>> ec2e3b2ba (Initial start on Aurora)
 
 
 def find_file(base_name, root):
@@ -121,9 +137,14 @@ def start(basedir, gamedir):
 
     window = pygame_sdl2.display.Window(
         sys.argv[0],
+<<<<<<< HEAD
         (sw, sh),
         flags=pygame_sdl2.WINDOW_BORDERLESS,
         pos=(x, y))
+=======
+        (0, 0),
+        flags=pygame_sdl2.WINDOW_FULLSCREEN_DESKTOP)
+>>>>>>> ec2e3b2ba (Initial start on Aurora)
 
     if presplash_fn:
         presplash = presplash.convert_alpha(window.get_surface())
@@ -133,6 +154,7 @@ def start(basedir, gamedir):
         window.get_surface().blit(presplash.background, (0, 0))
 
     window.update()
+    pygame_sdl2.display.flip()
 
     global start_time
     start_time = time.time()
