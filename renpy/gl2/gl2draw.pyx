@@ -818,7 +818,7 @@ cdef class GL2Draw:
                     renpy.plog(1, "after broken vsync sleep")
 
 
-    def draw_screen(self, render_tree, flip=True):
+    def draw_screen(self, render_tree, screenshot = False, flip=True):
         """
         Draws the screen.
         """
@@ -843,8 +843,6 @@ cdef class GL2Draw:
         self.change_fbo(self.default_fbo)
 
         # Set up the viewport.
-
-        screenshot = False
 
         if screenshot:
             x = 0
@@ -1088,7 +1086,7 @@ cdef class GL2Draw:
 
         # Draw the last screen to the back buffer.
         if render_tree is not None:
-            self.draw_screen(render_tree, flip=False)
+            self.draw_screen(render_tree, screenshot=True, flip=False)
             glFinish()
 
         # Read the pixels.
