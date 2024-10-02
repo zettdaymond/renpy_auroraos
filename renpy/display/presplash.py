@@ -32,6 +32,7 @@ import sys
 import time
 
 import renpy
+import renpy.display
 
 # The window.
 window = None
@@ -45,19 +46,12 @@ start_time = time.time()
 
 class ProgressBar(pygame_sdl2.sprite.Sprite):
 
-    def __init__(self, foreground, background):
+    def __init__(self, foreground, background, vertical_splash):
         super(ProgressBar, self).__init__()
 
-        self.auroraos_vertical_viewport = False
+        self.vertical_splash = vertical_splash
 
-        pwidth, pheight = renpy.display.core.get_size()
-        if renpy.auroraos:
-            # chaeck if wayland get vertical surface
-            if pwidth < pheight:
-                self.auroraos_vertical_viewport = True
-                pwidth, pheight = tuple(reversed(renpy.display.core.get_size()))
-
-        if self.auroraos_vertical_viewport:
+        if self.vertical_splash:
             self.foreground = pygame_sdl2.transform.rotate(pygame_sdl2.image.load(foreground), 270)
             self.background = pygame_sdl2.transform.rotate(pygame_sdl2.image.load(background), 270)
         else:
@@ -83,7 +77,7 @@ class ProgressBar(pygame_sdl2.sprite.Sprite):
     def update(self, total):
         self.counter += 1
         
-        if self.auroraos_vertical_viewport:
+        if self.vertical_splash:
             new_height = self.height * min(self.counter / total, 1)
             foreground = self.foreground.subsurface(0, 0, self.width, new_height)
             self.image.blit(self.background, (self.x, self.y))
@@ -111,6 +105,16 @@ def start(basedir, gamedir):
 
     if "RENPY_LESS_UPDATES" in os.environ:
         return
+    
+    global auroraos_vertical_splash
+    auroraos_vertical_splash = False
+
+    bounds = pygame_sdl2.display.get_display_bounds(0)
+
+    if renpy.auroraos:
+        # check if wayland get vertical surface
+        if bounds[2] < bounds[3]:
+            auroraos_vertical_splash = True
 
     presplash_fn = find_file("presplash", root=gamedir)
 
@@ -133,9 +137,12 @@ def start(basedir, gamedir):
     global progress_bar
 
     if presplash_fn:
-        presplash = pygame_sdl2.image.load(presplash_fn)
+        if auroraos_vertical_splash:
+            presplash = pygame_sdl2.transform.rotate(pygame_sdl2.image.load(presplash_fn), 270)
+        else:
+            presplash = pygame_sdl2.image.load(presplash_fn)
     else:
-        presplash = ProgressBar(foreground_fn, background_fn)
+        presplash = ProgressBar(foreground_fn, background_fn, auroraos_vertical_splash)
         progress_bar = presplash
 
     global window
@@ -149,14 +156,15 @@ def start(basedir, gamedir):
     window = pygame_sdl2.display.Window(
         sys.argv[0],
         (0, 0),
+        pos=(0,0),
         flags=pygame_sdl2.WINDOW_FULLSCREEN_DESKTOP)
 
     if presplash_fn:
         presplash = presplash.convert_alpha(window.get_surface())
-        window.get_surface().blit(presplash, (0, 0))
+        window.get_surface().blit(presplash, (x, y))
     else:
         presplash.convert_alpha(window.get_surface())
-        window.get_surface().blit(presplash.background, (0, 0))
+        window.get_surface().blit(presplash.background, (x, y))
 
     window.update()
     pygame_sdl2.display.flip()
