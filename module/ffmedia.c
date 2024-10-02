@@ -10,6 +10,10 @@
 
 #include <stdlib.h>
 
+#ifndef _WIN32
+#define USE_POSIX_MEMALIGN
+#endif
+
 /* Should a mono channel be split into two equal stero channels (true) or
  * should the energy be split onto two stereo channels with 1/2 the energy
  * (false).
@@ -52,7 +56,7 @@ static SDL_Surface *rgba_surface = NULL;
 
 /*******************************************************************************
  * SDL_RWops <-> AVIOContext
- * */
+ */
 
 static int rwops_read(void *opaque, uint8_t *buf, int buf_size) {
     SDL_RWops *rw = (SDL_RWops *) opaque;
@@ -112,9 +116,14 @@ static void rwops_close(SDL_RWops *rw) {
 
 static double current_time = 0;
 
+typedef struct PacketQueueEntry {
+	AVPacket *pkt;
+	struct PacketQueueEntry *next;
+} PacketQueueEntry;
+
 typedef struct PacketQueue {
-	AVPacketList *first;
-	AVPacketList *last;
+	PacketQueueEntry *first;
+	PacketQueueEntry *last;
 } PacketQueue;
 
 typedef struct FrameQueue {
@@ -196,12 +205,9 @@ typedef struct MediaState {
 	AVCodecContext *video_context;
 	AVCodecContext *audio_context;
 
-	/* Queues of packets going to the audio and video
-	 * streams.
-	 */
+	/* Queues of packets going to the audio and video streams. */
 	PacketQueue video_packet_queue;
 	PacketQueue audio_packet_queue;
-
 
 	/* The total duration of the video. Only used for information purposes. */
 	double total_duration;
@@ -235,11 +241,6 @@ typedef struct MediaState {
 	/* A frame that video is decoded into. */
 	AVFrame *video_decode_frame;
 
-	/* The video packet we're decoding, and the partial packet. */
-	AVPacket video_pkt;
-	AVPacket video_pkt_tmp;
-
-
 	/* Video Stuff ***********************************************************/
 
 	/* Software rescaling context. */
@@ -263,7 +264,6 @@ typedef struct MediaState {
 
 	/* The offset between now and the time of the current frame, at least for video. */
 	double time_offset;
-
 
 } MediaState;
 
@@ -289,7 +289,11 @@ static void deallocate(MediaState *ms) {
 		}
 
 		if (sqe->pixels) {
+#ifndef USE_POSIX_MEMALIGN
 			SDL_free(sqe->pixels);
+#else
+			free(sqe->pixels);
+#endif
 		}
 		av_free(sqe);
 	}
@@ -301,8 +305,6 @@ static void deallocate(MediaState *ms) {
 	if (ms->video_decode_frame) {
 		av_frame_free(&ms->video_decode_frame);
 	}
-
-	av_packet_unref(&ms->video_pkt);
 
 	/* Destroy audio stuff. */
 	if (ms->swr) {
@@ -396,6 +398,8 @@ static void deallocate_deferred() {
     SDL_UnlockMutex(deallocate_mutex);
 }
 
+/* Frame queue ***************************************************************/
+
 static void enqueue_frame(FrameQueue *fq, AVFrame *frame) {
 	frame->opaque = NULL;
 
@@ -423,67 +427,108 @@ static AVFrame *dequeue_frame(FrameQueue *fq) {
 }
 
 
+/* Packet queue **************************************************************/
+
 static void enqueue_packet(PacketQueue *pq, AVPacket *pkt) {
-	AVPacketList *pl = av_malloc(sizeof(AVPacketList));
-	if (pl == NULL)
-	{
+	PacketQueueEntry *pqe = av_malloc(sizeof(PacketQueueEntry));
+	if (pqe == NULL) {
+		av_packet_free(&pkt);
 		return;
 	}
 
-	av_init_packet(&pl->pkt);
-	av_packet_ref(&pl->pkt, pkt);
-
-	pl->next = NULL;
+	pqe->pkt = pkt;
+	pqe->next = NULL;
 
 	if (!pq->first) {
-		pq->first = pq->last = pl;
+		pq->first = pq->last = pqe;
 	} else {
-		pq->last->next = pl;
-		pq->last = pl;
+		pq->last->next = pqe;
+		pq->last = pqe;
 	}
 }
 
-static int dequeue_packet(PacketQueue *pq, AVPacket *pkt) {
-	if (! pq->first ) {
-		return 0;
+static AVPacket *first_packet(PacketQueue *pq) {
+	if (pq->first) {
+		return pq->first->pkt;
+	} else {
+		return NULL;
+	}
+}
+
+static void dequeue_packet(PacketQueue *pq) {
+	if (! pq->first) {
+		return;
 	}
 
-	AVPacketList *pl = pq->first;
-
-	av_packet_move_ref(pkt, &pl->pkt);
-
-	pq->first = pl->next;
+	PacketQueueEntry *pqe = pq->first;
+	pq->first = pqe->next;
 
 	if (!pq->first) {
 		pq->last = NULL;
 	}
 
-	av_free(pl);
-
-	return 1;
+	av_packet_free(&pqe->pkt);
+	av_free(pqe);
 }
+
 static int count_packet_queue(PacketQueue *pq) {
-       AVPacketList *pl = pq->first;
+    PacketQueueEntry *pqe = pq->first;
 
-       int rv = 0;
+	int rv = 0;
 
-       while (pl) {
-               rv += 1;
-               pl = pl->next;
-       }
+	while (pqe) {
+		rv += 1;
+		pqe = pqe->next;
+	}
 
-       return rv;
+	return rv;
 }
 
 static void free_packet_queue(PacketQueue *pq) {
-	AVPacket scratch;
-
-	av_init_packet(&scratch);
-
-	while (dequeue_packet(pq, &scratch)) {
-		av_packet_unref(&scratch);
+	while(first_packet(pq)) {
+		dequeue_packet(pq);
 	}
 }
+
+
+/**
+ * Reads a packet from one of the queues, filling the other queue if
+ * necessary. Returns the packet, or NULL if end of file has been reached.
+ */
+static AVPacket *read_packet(MediaState *ms, PacketQueue *pq) {
+
+	AVPacket *pkt;
+	AVPacket *rv;
+
+	while (1) {
+
+		rv = first_packet(pq);
+		if (rv) {
+			return rv;
+		}
+
+		pkt = av_packet_alloc();
+
+		if (!pkt) {
+			return NULL;
+		}
+
+		if (av_read_frame(ms->ctx, pkt)) {
+			return NULL;
+		}
+
+		if (pkt->stream_index == ms->video_stream && ! ms->video_finished) {
+			enqueue_packet(&ms->video_packet_queue, pkt);
+		} else if (pkt->stream_index == ms->audio_stream && ! ms->audio_finished) {
+			enqueue_packet(&ms->audio_packet_queue, pkt);
+		} else {
+			av_packet_free(&pkt);
+		}
+	}
+}
+
+
+/* Surface queue *************************************************************/
 
 static void enqueue_surface(SurfaceQueueEntry **queue, SurfaceQueueEntry *sqe) {
 	while (*queue) {
@@ -524,36 +569,7 @@ static void check_surface_queue(MediaState *ms) {
 }
 #endif
 
-
-/**
- * Reads a packet from one of the queues, filling the other queue if
- * necessary.
- */
-static int read_packet(MediaState *ms, PacketQueue *pq, AVPacket *pkt) {
-	AVPacket scratch;
-
-	av_init_packet(&scratch);
-
-	while (1) {
-		if (dequeue_packet(pq, pkt)) {
-			return 1;
-		}
-
-		if (av_read_frame(ms->ctx, &scratch)) {
-			pkt->data = NULL;
-			pkt->size = 0;
-			return 0;
-		}
-
-		if (scratch.stream_index == ms->video_stream && ! ms->video_finished) {
-			enqueue_packet(&ms->video_packet_queue, &scratch);
-		} else if (scratch.stream_index == ms->audio_stream && ! ms->audio_finished) {
-			enqueue_packet(&ms->audio_packet_queue, &scratch);
-		}
-
-		av_packet_unref(&scratch);
-	}
-}
+/* Find decoder context ******************************************************/
 
 
 static AVCodecContext *find_context(AVFormatContext *ctx, int index) {
@@ -605,62 +621,11 @@ fail:
 }
 
 
-/**
- * Given a packet, decodes a frame if possible. This is intended to be a drop-in replacement
- * for the now deprecated avcodec_decode_audio4/video2 APIs.
- *
- * \param[in]   context     The context the decoding is done in.
- * \param[out]  frame       A frame that is updated with the decoded data.
- * \param[out]  got_frame   Set to 1 if a frame was decoded, 0 if not.
- * \param[in]   pkt         The packet data to present.
- *
- * Returns pkt->size if the packet was consumed, 0 if not, or < 0 on error (including
- * end of file.)
- */
-static int decode_common(AVCodecContext *context, AVFrame *frame, int *got_frame, AVPacket *pkt) {
+/* Audio decoding *************************************************************/
 
-    int ret;
-    int rv = 0;
-
-    if (pkt) {
-        ret = avcodec_send_packet(context, pkt);
-
-        if (ret >= 0) {
-            rv = pkt->size;
-        } else if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
-            rv = 0;
-        } else {
-           return ret;
-        }
-    }
-
-    ret = avcodec_receive_frame(context, frame);
-
-    if (ret >= 0) {
-        *got_frame = 1;
-    } else if (ret == AVERROR(EAGAIN)) {
-        *got_frame = 0;
-    } else if (ret == AVERROR_EOF) {
-        *got_frame = 0;
-        if (!pkt || pkt->size == 0) {
-            return ret;
-        }
-    } else {
-        *got_frame = 0;
-        return ret;
-    }
-
-    return rv;
-}
-
-
-/**
- * Decodes audio. Returns 0 if no audio was decoded, or 1 if some audio was
- * decoded.
- */
 static void decode_audio(MediaState *ms) {
-	AVPacket pkt;
-	AVPacket pkt_temp;
+	int ret;
+	AVPacket *pkt;
 	AVFrame *converted_frame;
 
 	if (!ms->audio_context) {
@@ -677,8 +642,6 @@ static void decode_audio(MediaState *ms) {
 		return;
 	}
 
-	av_init_packet(&pkt);
-
 	double timebase = av_q2d(ms->ctx->streams[ms->audio_stream]->time_base);
 
 	if (ms->audio_queue_target_samples < audio_target_samples) {
@@ -687,35 +650,31 @@ static void decode_audio(MediaState *ms) {
 
 	while (ms->audio_queue_samples < ms->audio_queue_target_samples) {
 
-		read_packet(ms, &ms->audio_packet_queue, &pkt);
+		/** Read a packet, and send it to the decoder. */
+		pkt = read_packet(ms, &ms->audio_packet_queue);
+		ret = avcodec_send_packet(ms->audio_context, pkt);
 
-		pkt_temp = pkt;
+		if (ret == 0) {
+			dequeue_packet(&ms->audio_packet_queue);
+		} else if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+			// pass
+		} else {
+			ms->audio_finished = 1;
+			return;
+		}
 
-		do {
-			int got_frame;
-			int read_size = decode_common(ms->audio_context, ms->audio_decode_frame, &got_frame, &pkt_temp);
+		while (1) {
 
-			if (read_size < 0) {
+			ret = avcodec_receive_frame(ms->audio_context, ms->audio_decode_frame);
 
-				if (pkt.data) {
-					av_packet_unref(&pkt);
-				}
-
-				ms->audio_finished = 1;
-				return;
+			// More input is needed.
+			if (ret == AVERROR(EAGAIN)) {
+				break;
 			}
 
-			pkt_temp.data += read_size;
-			pkt_temp.size -= read_size;
-
-			if (!got_frame) {
-				if (pkt.data == NULL) {
-					ms->audio_finished = 1;
-					av_packet_unref(&pkt);
-					return;
-				}
-
-				break;
+			if (ret < 0) {
+				ms->audio_finished = 1;
+				return;
 			}
 
             converted_frame = av_frame_alloc();
@@ -777,17 +736,16 @@ static void decode_audio(MediaState *ms) {
 			}
 
 			SDL_UnlockMutex(ms->lock);
-
-		} while (pkt_temp.size);
-
-		if (pkt.data) {
-			av_packet_unref(&pkt);
 		}
+
 	}
 
 	return;
 
 }
+
+
+/* Video decoding *************************************************************/
 
 static enum AVPixelFormat get_pixel_format(SDL_Surface *surf) {
     uint32_t pixel;
@@ -811,37 +769,37 @@ static enum AVPixelFormat get_pixel_format(SDL_Surface *surf) {
 }
 
 
-
 static SurfaceQueueEntry *decode_video_frame(MediaState *ms) {
+	int ret;
 
 	while (1) {
 
-		if (! ms->video_pkt_tmp.size) {
-			av_packet_unref(&ms->video_pkt);
-			read_packet(ms, &ms->video_packet_queue, &ms->video_pkt);
-			ms->video_pkt_tmp = ms->video_pkt;
-		}
+		AVPacket *pkt = read_packet(ms, &ms->video_packet_queue);
+		ret = avcodec_send_packet(ms->video_context, pkt);
 
-		int got_frame = 0;
-		int read_size = decode_common(ms->video_context, ms->video_decode_frame, &got_frame, &ms->video_pkt_tmp);
 
-		if (read_size < 0) {
+		if (ret == 0) {
+			dequeue_packet(&ms->video_packet_queue);
+		} else if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+			// pass
+		} else {
 			ms->video_finished = 1;
 			return NULL;
 		}
 
-		ms->video_pkt_tmp.data += read_size;
-		ms->video_pkt_tmp.size -= read_size;
+		ret = avcodec_receive_frame(ms->video_context, ms->video_decode_frame);
 
-		if (got_frame) {
-			break;
+		// More input is needed.
+		if (ret == AVERROR(EAGAIN)) {
+			continue;
 		}
 
-		if (!got_frame && !ms->video_pkt.size) {
+		if (ret < 0) {
 			ms->video_finished = 1;
 			return NULL;
 		}
 
+		break;
 	}
 
 	double pts = ms->video_decode_frame->best_effort_timestamp * av_q2d(ms->ctx->streams[ms->video_stream]->time_base);
@@ -866,27 +824,33 @@ static SurfaceQueueEntry *decode_video_frame(MediaState *ms) {
 
 	SDL_Surface *sample = rgba_surface;
 
-	ms->sws = sws_getCachedContext(
-		ms->sws,
+	if (ms->sws == NULL) {
+		ms->sws = sws_getContext(
+			ms->video_decode_frame->width,
+			ms->video_decode_frame->height,
+			ms->video_decode_frame->format,
 
-		ms->video_decode_frame->width,
-		ms->video_decode_frame->height,
-		ms->video_decode_frame->format,
+			ms->video_decode_frame->width,
+			ms->video_decode_frame->height,
+			get_pixel_format(sample),
 
-		ms->video_decode_frame->width,
-		ms->video_decode_frame->height,
-		get_pixel_format(rgba_surface),
+			SWS_POINT | SWS_FULL_CHR_H_INP | SWS_FULL_CHR_H_INT,
 
-		SWS_POINT,
+			NULL,
+			NULL,
+			NULL
+			);
 
-		NULL,
-		NULL,
-		NULL
-		);
 
-	if (!ms->sws) {
-		ms->video_finished = 1;
-		return NULL;
+		if (!ms->sws) {
+			ms->video_finished = 1;
+			return NULL;
+		}
+
+		sws_setColorspaceDetails(ms->sws,
+			sws_getCoefficients(SWS_CS_DEFAULT), 0,
+			sws_getCoefficients(SWS_CS_DEFAULT), 0,
+			0, 1 << 16, 1 << 16);
 	}
 
 	SurfaceQueueEntry *rv = av_malloc(sizeof(SurfaceQueueEntry));
@@ -903,13 +867,15 @@ static SurfaceQueueEntry *decode_video_frame(MediaState *ms) {
 	    rv->pitch += ROW_ALIGNMENT - (rv->pitch % ROW_ALIGNMENT);
 	}
 
-#if defined(_WIN32)
+#ifndef USE_POSIX_MEMALIGN
     rv->pixels = SDL_calloc(rv->pitch * rv->h, 1);
 #else
-    posix_memalign(&rv->pixels, ROW_ALIGNMENT, rv->pitch * rv->h);
-#endif
-
+	if (posix_memalign(&rv->pixels, ROW_ALIGNMENT, rv->pitch * rv->h)) {
+		av_free(rv);
+		return NULL;
+	}
     memset(rv->pixels, 0, rv->pitch * rv->h);
+#endif
 
 	rv->format = sample->format;
 	rv->next = NULL;
@@ -1019,7 +985,13 @@ int media_video_ready(struct MediaState *ms) {
 			SurfaceQueueEntry *sqe = dequeue_surface(&ms->surface_queue);
 			ms->surface_queue_size -= 1;
 
-			SDL_free(sqe->pixels);
+			if (sqe->pixels) {
+#ifndef USE_POSIX_MEMALIGN
+				SDL_free(sqe->pixels);
+#else
+				free(sqe->pixels);
+#endif
+			}
 			av_free(sqe);
 
 			consumed = 1;
@@ -1158,7 +1130,7 @@ static int decode_thread(void *arg) {
 	ms->video_stream = -1;
 	ms->audio_stream = -1;
 
-	for (int i = 0; i < ctx->nb_streams; i++) {
+	for (unsigned int i = 0; i < ctx->nb_streams; i++) {
 		if (ctx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
 			if (ms->want_video && ms->video_stream == -1) {
 				ms->video_stream = i;
@@ -1179,8 +1151,6 @@ static int decode_thread(void *arg) {
 	if (ms->swr == NULL) {
 		goto finish;
 	}
-
-	av_init_packet(&ms->video_pkt);
 
 	// Compute the number of samples we need to play back.
 	if (ms->audio_duration < 0) {
@@ -1320,7 +1290,7 @@ static int decode_sync_start(void *arg) {
 	ms->video_stream = -1;
 	ms->audio_stream = -1;
 
-	for (int i = 0; i < ctx->nb_streams; i++) {
+	for (unsigned int i = 0; i < ctx->nb_streams; i++) {
 		if (ctx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
 			if (ms->want_video && ms->video_stream == -1) {
 				ms->video_stream = i;
@@ -1341,8 +1311,6 @@ static int decode_sync_start(void *arg) {
 	if (ms->swr == NULL) {
 		media_read_sync_finish(ms);
 	}
-
-	av_init_packet(&ms->video_pkt);
 
 	// Compute the number of samples we need to play back.
 	if (ms->audio_duration < 0) {
@@ -1426,7 +1394,7 @@ int media_read_audio(struct MediaState *ms, Uint8 *stream, int len) {
 	int rv = 0;
 
 	if (ms->audio_duration >= 0) {
-		unsigned int remaining = (ms->audio_duration - ms->audio_read_samples) * BPS;
+		int remaining = (ms->audio_duration - ms->audio_read_samples) * BPS;
 		if (len > remaining) {
 			len = remaining;
 		}
@@ -1646,5 +1614,3 @@ void media_init(int rate, int status, int equal_mono) {
     }
 
 }
-
-
