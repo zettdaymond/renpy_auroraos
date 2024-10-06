@@ -3155,7 +3155,9 @@ class Interface(object):
         if renpy.config.quit_on_mobile_background:
             sys.exit(0)
 
-        renpy.exports.free_memory()
+        # it takes to much time to free memory
+        if renpy.auroraos == False:
+            renpy.exports.free_memory()
 
         print("Entered background.")
 
