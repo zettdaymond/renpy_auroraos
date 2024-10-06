@@ -631,11 +631,14 @@ cdef class GL2Draw:
 
         # Generate the framebuffer.
         glGenFramebuffers(1, &self.fbo)
+        glGenFramebuffers(1, &self.fbo_1px)
 
         glGenRenderbuffers(1, &self.color_renderbuffer)
+        glGenRenderbuffers(1, &self.color_renderbuffer_1px)
 
         if renpy.config.depth_size:
             glGenRenderbuffers(1, &self.depth_renderbuffer)
+            glGenRenderbuffers(1, &self.depth_renderbuffer_1px)
 
         glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_texture_size)
         glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE, &max_renderbuffer_size)
@@ -654,11 +657,15 @@ cdef class GL2Draw:
         height = max(self.virtual_size[1] + BORDER, self.drawable_size[1] + BORDER, height)
         height = min(height, max_texture_size, max_renderbuffer_size)
 
+        if "RENPY_MAX_TEXTURE_SIZE" in os.environ:
+            width = height = int(os.environ["RENPY_MAX_TEXTURE_SIZE"])
+
         renpy.display.log.write("Maximum texture size: %dx%d", width, height)
 
         self.texture_loader.max_texture_width = width
         self.texture_loader.max_texture_height = height
 
+        # Full-size fbo.
         self.change_fbo(self.fbo)
 
         glBindRenderbuffer(GL_RENDERBUFFER, self.color_renderbuffer)
@@ -689,6 +696,37 @@ cdef class GL2Draw:
                 GL_RENDERBUFFER,
                 self.depth_renderbuffer)
 
+        # 1px fbo.
+        self.change_fbo(self.fbo_1px)
+
+        glBindRenderbuffer(GL_RENDERBUFFER, self.color_renderbuffer_1px)
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8,  1, 1)
+
+        glFramebufferRenderbuffer(
+            GL_FRAMEBUFFER,
+            GL_COLOR_ATTACHMENT0,
+            GL_RENDERBUFFER,
+            self.color_renderbuffer_1px)
+
+        if renpy.config.depth_size:
+
+            glBindRenderbuffer(GL_RENDERBUFFER, self.depth_renderbuffer_1px)
+
+            if self.gles:
+                if renpy.config.depth_size >= 24:
+                    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, 1, 1)
+                else:
+                    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, 1, 1)
+
+            else:
+                glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT, 1, 1)
+
+            glFramebufferRenderbuffer(
+                GL_FRAMEBUFFER,
+                GL_DEPTH_ATTACHMENT,
+                GL_RENDERBUFFER,
+                self.depth_renderbuffer_1px)
+
         glBindRenderbuffer(GL_RENDERBUFFER, default_renderbuffer)
         self.change_fbo(self.default_fbo)
 
@@ -697,11 +735,19 @@ cdef class GL2Draw:
 
         self.change_fbo(self.default_fbo)
 
+        # Full-size fbo.
         glDeleteFramebuffers(1, &self.fbo)
         glDeleteRenderbuffers(1, &self.color_renderbuffer)
 
         if renpy.config.depth_size:
             glDeleteRenderbuffers(1, &self.depth_renderbuffer)
+
+        # 1px fbo.
+        glDeleteFramebuffers(1, &self.fbo_1px)
+        glDeleteRenderbuffers(1, &self.color_renderbuffer_1px)
+
+        if renpy.config.depth_size:
+            glDeleteRenderbuffers(1, &self.depth_renderbuffer_1px)
 
 
     def can_block(self):
@@ -818,7 +864,7 @@ cdef class GL2Draw:
                     renpy.plog(1, "after broken vsync sleep")
 
 
-    def draw_screen(self, render_tree, screenshot = False, flip=True):
+    def draw_screen(self, render_tree, screenshot=False, flip=True):
         """
         Draws the screen.
         """
@@ -840,7 +886,10 @@ cdef class GL2Draw:
         self.load_all_textures(surf)
 
         # Switch to the right FBO, and the right viewport.
-        self.change_fbo(self.default_fbo)
+        if screenshot:
+            self.change_fbo(self.fbo)
+        else:
+            self.change_fbo(self.default_fbo)
 
         # Set up the viewport.
 
@@ -859,17 +908,14 @@ cdef class GL2Draw:
 
         # Clear the screen.
         clear_r, clear_g, clear_b = renpy.color.Color(renpy.config.gl_clear_color).rgb
-        glClearColor(clear_r, clear_g, clear_b, 1.0)
+        glClearColor(clear_r, clear_g, clear_b, 0.0 if screenshot else 1.0)
         glClear(GL_COLOR_BUFFER_BIT)
 
         # Project the child from virtual space to the screen space.
         cdef Matrix transform
 
         if screenshot:
-            if self.auroraos_vertical_viewport:
-                transform = Matrix.cscreen_projection(surf.width, surf.height)
-            else:
-                transform = Matrix.cscreen_projection(surf.width, surf.height)
+            transform = Matrix.cscreen_projection(surf.width, surf.height)
         else:
             if self.auroraos_vertical_viewport:
                 transform = Matrix.rotate(0, 0, -90) *  Matrix.cscreen_projection(self.virtual_size[0], self.virtual_size[1])
@@ -984,7 +1030,7 @@ cdef class GL2Draw:
         self.load_all_textures(what)
 
         # Switch to the right FBO, and the right viewport.
-        self.change_fbo(self.fbo)
+        self.change_fbo(self.fbo_1px)
 
         # Set up the viewport.
         glViewport(0, 0, 1, 1)
@@ -1077,8 +1123,10 @@ cdef class GL2Draw:
         cdef unsigned char *rpp
         cdef int x, y, pitch
 
-        # A surface the size of the framebuffer.
-        full = renpy.display.pgrender.surface_unscaled(self.drawable_size, False)
+        sw = render_tree.width * self.draw_per_virt
+        sh = render_tree.height * self.draw_per_virt
+
+        full = renpy.display.pgrender.surface_unscaled((sw, sh), True)
         surf = PySurface_AsSurface(full)
 
         # Create an array that can hold densely-packed pixels.
@@ -1086,7 +1134,7 @@ cdef class GL2Draw:
 
         # Draw the last screen to the back buffer.
         if render_tree is not None:
-            self.draw_screen(render_tree, screenshot=True, flip=False)
+            self.draw_screen(render_tree, flip=False, screenshot=True)
             glFinish()
 
         # Read the pixels.
@@ -1104,23 +1152,35 @@ cdef class GL2Draw:
         pitch = surf.pitch
         rpp = raw_pixels
 
+        cdef unsigned char r
+        cdef unsigned char g
+        cdef unsigned char b
+        cdef unsigned char a
+
         with nogil:
             for y from 0 <= y < surf.h:
-                for x from 0 <= x < (surf.w * 4):
-                    pixels[x] = rpp[x]
+                for x from 0 <= x < surf.w:
+                    r = rpp[x * 4 + 0]
+                    g = rpp[x * 4 + 1]
+                    b = rpp[x * 4 + 2]
+                    a = rpp[x * 4 + 3]
+
+                    if 0 < a < 255:
+                        r = r * 255 // a
+                        g = g * 255 // a
+                        b = b * 255 // a
+
+                    pixels[x * 4 + 0] = r
+                    pixels[x * 4 + 1] = g
+                    pixels[x * 4 + 2] = b
+                    pixels[x * 4 + 3] = a
 
                 pixels += pitch
                 rpp += surf.w * 4
 
         free(raw_pixels)
 
-        px, py, pw, ph = self.physical_box
-        xmul = self.drawable_size[0] / self.physical_size[0]
-        ymul = self.drawable_size[1] / self.physical_size[1]
-
-        # Crop and flip it, since it's upside down.
-        rv = full.subsurface((px * xmul, py * ymul, pw * xmul, ph * ymul))
-        rv = renpy.display.pgrender.flip_unscaled(rv, False, True)
+        rv = renpy.display.pgrender.flip_unscaled(full, False, True)
 
         return rv
 
