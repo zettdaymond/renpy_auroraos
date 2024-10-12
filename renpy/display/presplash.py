@@ -43,6 +43,15 @@ progress_bar = None
 # The start time.
 start_time = time.time()
 
+def transformScaleKeepRatio(image, size):
+    iwidth, iheight = image.get_size()
+    scale = min(size[0] / iwidth, size[1] / iheight)
+    #scale = max(size[0] / iwidth, size[1] / iheight)
+    new_size = (round(iwidth * scale), round(iheight * scale))
+    scaled_image = pygame_sdl2.transform.smoothscale(image, new_size) 
+    image_rect = scaled_image.get_rect(center = (size[0] // 2, size[1] // 2))
+    return scaled_image, image_rect
+
 
 class ProgressBar(pygame_sdl2.sprite.Sprite):
 
@@ -58,14 +67,17 @@ class ProgressBar(pygame_sdl2.sprite.Sprite):
             self.foreground = pygame_sdl2.image.load(foreground)
             self.background = pygame_sdl2.image.load(background)
 
+        bounds = pygame_sdl2.display.get_display_bounds(0)
+        
+        self.foreground, fg_rect = transformScaleKeepRatio(self.foreground, (bounds[2], bounds[3]))
+        self.background, bg_rect = transformScaleKeepRatio(self.background, (bounds[2], bounds[3]))
+       
         self.width, self.height = self.background.get_size()
+        self.x = bg_rect.x
+        self.y = bg_rect.y
+
         self.image = pygame_sdl2.Surface((self.width, self.height))
         self.counter = 0.0
-
-        bounds = pygame_sdl2.display.get_display_bounds(0)
-
-        self.x = bounds[0] + bounds[2] // 2 - self.width // 2
-        self.y = bounds[1] + bounds[3] // 2 - self.height // 2
 
     def convert_alpha(self, surface=None):
         self.foreground = self.foreground.convert_alpha(surface)
@@ -80,8 +92,8 @@ class ProgressBar(pygame_sdl2.sprite.Sprite):
         if self.vertical_splash:
             new_height = self.height * min(self.counter / total, 1)
             foreground = self.foreground.subsurface(0, 0, self.width, new_height)
-            self.image.blit(self.background, (self.x, self.y))
-            self.image.blit(foreground, (self.x, self.y))
+            self.image.blit(self.background, (0, 0))
+            self.image.blit(foreground, (0, 0))
         else:
             width = self.width * min(self.counter / total, 1)
             foreground = self.foreground.subsurface(0, 0, width, self.height)
@@ -106,6 +118,8 @@ def start(basedir, gamedir):
     if "RENPY_LESS_UPDATES" in os.environ:
         return
     
+    pygame_sdl2.display.init()
+    
     global auroraos_vertical_splash
     auroraos_vertical_splash = False
 
@@ -126,13 +140,10 @@ def start(basedir, gamedir):
             return
 
     if renpy.windows:
-
         import ctypes
         from ctypes import c_void_p, c_int
 
         ctypes.windll.user32.SetProcessDPIAware()
-
-    pygame_sdl2.display.init()
 
     global progress_bar
 
@@ -146,8 +157,6 @@ def start(basedir, gamedir):
         progress_bar = presplash
 
     global window
-
-    bounds = pygame_sdl2.display.get_display_bounds(0)
 
     sw, sh = presplash.get_size()
     x = bounds[0] + bounds[2] // 2 - sw // 2
@@ -179,7 +188,7 @@ def pump_window():
 
     if progress_bar and renpy.game.script:
         progress_bar.update(len(renpy.game.script.script_files) + 23)
-        window.get_surface().blit(progress_bar.image, (0, 0))
+        window.get_surface().blit(progress_bar.image, (progress_bar.x, progress_bar.y))
         window.update()
 
     for ev in pygame_sdl2.event.get():
