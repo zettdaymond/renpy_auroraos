@@ -61,6 +61,11 @@ from renpy.gl2.gl2model cimport GL2Model
 from renpy.gl2.gl2texture import Texture, TextureLoader
 from renpy.gl2.gl2shadercache import ShaderCache
 
+try:
+    import auroraembed
+except ImportError:
+    pass
+
 # Cache various externals, so we can use them more efficiently.
 cdef int DISSOLVE, IMAGEDISSOLVE, PIXELLATE
 DISSOLVE = renpy.display.render.DISSOLVE
@@ -1104,16 +1109,29 @@ cdef class GL2Draw:
         return x, y
 
     def mouse_event(self, ev):
-        x, y = getattr(ev, 'pos', pygame.mouse.get_pos())
+        default_mouse_pygame = pygame.mouse.get_pos()
+
+        if renpy.auroraos:
+            default_mouse_pygame = auroraembed.get_mouse()
+
+        x, y = getattr(ev, 'pos', default_mouse_pygame)
         return self.translate_point(x, y)
 
     def get_mouse_pos(self):
-        x, y = pygame.mouse.get_pos()
-        return self.translate_point(x, y)
+        if renpy.auroraos:
+            x, y = auroraembed.get_mouse()
+            return self.translate_point(x, y)
+        else:    
+            x, y = pygame.mouse.get_pos()
+            return self.translate_point(x, y)
 
     def set_mouse_pos(self, x, y):
         x, y = self.untranslate_point(x, y)
-        pygame.mouse.set_pos([x, y])
+        
+        if renpy.auroraos:
+            auroraembed.set_mouse((x, y))
+        else:
+            pygame.mouse.set_pos([x, y])
 
     def screenshot(self, render_tree):
         cdef unsigned char *pixels
